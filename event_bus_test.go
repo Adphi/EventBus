@@ -33,19 +33,19 @@ func TestHasCallback(t *testing.T) {
 	assert.True(t, bus.HasCallback(&EventA{}))
 }
 
-func TestSubscribe(t *testing.T) {
+func TestSubscribeSync(t *testing.T) {
 	bus := New()
 	assert.NoError(t, bus.SubscribeSync(func(*EventB) error { return nil }))
 	assert.Error(t, bus.SubscribeSync("topic"))
 }
 
-func TestSubscribeOnce(t *testing.T) {
+func TestSubscribeOnceSync(t *testing.T) {
 	bus := New()
-	assert.NoError(t, bus.SubscribeOnce(func(a *EventA) error { return nil }))
+	assert.NoError(t, bus.SubscribeOnceSync(func(a *EventA) error { return nil }))
 	assert.Error(t, bus.SubscribeOnce(func(a *EventA) {}))
 }
 
-func TestSubscribeOnceAndManySubscribe(t *testing.T) {
+func TestSubscribeOnceAndManySubscribeSync(t *testing.T) {
 	bus := New()
 	flag := 0
 	fn := func(e *EventA) error { flag += 1; return nil }
@@ -110,15 +110,16 @@ func TestPublish(t *testing.T) {
 }
 
 type Event1 struct {
-	a int
+	a   int
 	out *[]int
 	dur string
 }
+
 func (Event1) Topic() string {
 	return "event1"
 }
 
-func TestSubcribeOnceAsync(t *testing.T) {
+func TestSubcribeOnce(t *testing.T) {
 	results := make([]int, 0)
 	bus := New()
 	assert.NoError(t, bus.SubscribeOnce(func(e *Event1) error {
@@ -136,7 +137,7 @@ func TestSubcribeOnceAsync(t *testing.T) {
 	assert.False(t, bus.HasCallback(&Event1{}))
 }
 
-func TestSubscribeAsyncTransactional(t *testing.T) {
+func TestSubscribeTransactional(t *testing.T) {
 	results := make([]int, 0)
 
 	bus := New()
@@ -156,4 +157,3 @@ func TestSubscribeAsyncTransactional(t *testing.T) {
 	assert.Equal(t, 1, results[0])
 	assert.Equal(t, 2, results[1])
 }
-
