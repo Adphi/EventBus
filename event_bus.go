@@ -1,28 +1,35 @@
 package eventbus
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
 )
 
+var ErrInvalidHandler = errors.New("handler be func(e T extends Event) error")
+
+type Event interface {
+	Topic() string
+}
+
 // BusSubscriber defines subscription-related bus behavior
 type BusSubscriber interface {
-	Subscribe(topic string, fn interface{}) error
-	SubscribeAsync(topic string, fn interface{}, transactional bool) error
-	SubscribeOnce(topic string, fn interface{}) error
-	SubscribeOnceAsync(topic string, fn interface{}) error
-	Unsubscribe(topic string, handler interface{}) error
+	SubscribeSync(fn interface{}) error
+	Subscribe(fn interface{}, transactional ...bool) error
+	SubscribeOnceSync(fn interface{}) error
+	SubscribeOnce(fn interface{}) error
+	Unsubscribe(handler interface{}) error
 }
 
 // BusPublisher defines publishing-related bus behavior
 type BusPublisher interface {
-	Publish(topic string, args ...interface{})
+	Publish(e Event) error
 }
 
 // BusController defines bus control behavior (checking handler's presence, synchronization)
 type BusController interface {
-	HasCallback(topic string) bool
+	HasCallback(e Event) bool
 	WaitAsync()
 }
 
@@ -59,67 +66,76 @@ func New() Bus {
 }
 
 // doSubscribe handles the subscription logic and is utilized by the public Subscribe functions
-func (bus *EventBus) doSubscribe(topic string, fn interface{}, handler *eventHandler) error {
+func (bus *EventBus) doSubscribe(fn interface{}, handler *eventHandler) error {
 	bus.lock.Lock()
 	defer bus.lock.Unlock()
-	if !(reflect.TypeOf(fn).Kind() == reflect.Func) {
-		return fmt.Errorf("%s is not of type reflect.Func", reflect.TypeOf(fn).Kind())
+	topic, err := handlerTopic(fn)
+	if err != nil {
+		return err
 	}
 	bus.handlers[topic] = append(bus.handlers[topic], handler)
 	return nil
 }
 
-// Subscribe subscribes to a topic.
-// Returns error if `fn` is not a function.
-func (bus *EventBus) Subscribe(topic string, fn interface{}) error {
-	return bus.doSubscribe(topic, fn, &eventHandler{
+// SubscribeSync subscribes to an Event type with a synchronous callback.
+// Returns error if `fn` is not func(e T extends Event) error.
+func (bus *EventBus) SubscribeSync(fn interface{}) error {
+	return bus.doSubscribe(fn, &eventHandler{
 		reflect.ValueOf(fn), false, false, false, sync.Mutex{},
 	})
 }
 
-// SubscribeAsync subscribes to a topic with an asynchronous callback
-// Transactional determines whether subsequent callbacks for a topic are
+// Subscribe subscribes to an Event type with an asynchronous callback
+// Transactional determines whether subsequent callbacks for an Event type are
 // run serially (true) or concurrently (false)
-// Returns error if `fn` is not a function.
-func (bus *EventBus) SubscribeAsync(topic string, fn interface{}, transactional bool) error {
-	return bus.doSubscribe(topic, fn, &eventHandler{
-		reflect.ValueOf(fn), false, true, transactional, sync.Mutex{},
+// Returns error if `fn` is not func(e T extends Event) error.
+func (bus *EventBus) Subscribe(fn interface{}, transactional ...bool) error {
+	var t bool
+	if len(transactional) > 0 {
+		t = transactional[0]
+	}
+	return bus.doSubscribe(fn, &eventHandler{
+		reflect.ValueOf(fn), false, true, t, sync.Mutex{},
 	})
 }
 
-// SubscribeOnce subscribes to a topic once. Handler will be removed after executing.
-// Returns error if `fn` is not a function.
-func (bus *EventBus) SubscribeOnce(topic string, fn interface{}) error {
-	return bus.doSubscribe(topic, fn, &eventHandler{
+// SubscribeOnceSync subscribes to an Event type once with a synchronous callback. Handler will be removed after executing.
+// Returns error if `fn` is not func(e T extends Event) error.
+func (bus *EventBus) SubscribeOnceSync(fn interface{}) error {
+	return bus.doSubscribe(fn, &eventHandler{
 		reflect.ValueOf(fn), true, false, false, sync.Mutex{},
 	})
 }
 
-// SubscribeOnceAsync subscribes to a topic once with an asynchronous callback
+// SubscribeOnce subscribes to an Event type once.
 // Handler will be removed after executing.
-// Returns error if `fn` is not a function.
-func (bus *EventBus) SubscribeOnceAsync(topic string, fn interface{}) error {
-	return bus.doSubscribe(topic, fn, &eventHandler{
+// Returns error if `fn` is not func(e T extends Event) error.
+func (bus *EventBus) SubscribeOnce(fn interface{}) error {
+	return bus.doSubscribe(fn, &eventHandler{
 		reflect.ValueOf(fn), true, true, false, sync.Mutex{},
 	})
 }
 
 // HasCallback returns true if exists any callback subscribed to the topic.
-func (bus *EventBus) HasCallback(topic string) bool {
+func (bus *EventBus) HasCallback(e Event) bool {
 	bus.lock.Lock()
 	defer bus.lock.Unlock()
-	_, ok := bus.handlers[topic]
+	_, ok := bus.handlers[e.Topic()]
 	if ok {
-		return len(bus.handlers[topic]) > 0
+		return len(bus.handlers[e.Topic()]) > 0
 	}
 	return false
 }
 
-// Unsubscribe removes callback defined for a topic.
+// Unsubscribe removes callback defined for an Event type.
 // Returns error if there are no callbacks subscribed to the topic.
-func (bus *EventBus) Unsubscribe(topic string, handler interface{}) error {
+func (bus *EventBus) Unsubscribe(handler interface{}) error {
 	bus.lock.Lock()
 	defer bus.lock.Unlock()
+	topic, err := handlerTopic(handler)
+	if err != nil {
+		return err
+	}
 	if _, ok := bus.handlers[topic]; ok && len(bus.handlers[topic]) > 0 {
 		bus.removeHandler(topic, bus.findHandlerIdx(topic, reflect.ValueOf(handler)))
 		return nil
@@ -127,10 +143,14 @@ func (bus *EventBus) Unsubscribe(topic string, handler interface{}) error {
 	return fmt.Errorf("topic %s doesn't exist", topic)
 }
 
-// Publish executes callback defined for a topic. Any additional argument will be transferred to the callback.
-func (bus *EventBus) Publish(topic string, args ...interface{}) {
+// Publish executes callback defined for an Event type. Any additional argument will be transferred to the callback.
+func (bus *EventBus) Publish(e Event) error {
+	if e == nil {
+		return errors.New("event cannot be nil")
+	}
 	bus.lock.Lock() // will unlock if handler is not found or always after setUpPublish
 	defer bus.lock.Unlock()
+	topic := e.Topic()
 	if handlers, ok := bus.handlers[topic]; ok && 0 < len(handlers) {
 		// Handlers slice may be changed by removeHandler and Unsubscribe during iteration,
 		// so make a copy and iterate the copied slice.
@@ -140,32 +160,37 @@ func (bus *EventBus) Publish(topic string, args ...interface{}) {
 			if handler.flagOnce {
 				bus.removeHandler(topic, i)
 			}
-			if !handler.async {
-				bus.doPublish(handler, topic, args...)
-			} else {
+			if handler.async {
 				bus.wg.Add(1)
 				if handler.transactional {
 					bus.lock.Unlock()
 					handler.Lock()
 					bus.lock.Lock()
 				}
-				go bus.doPublishAsync(handler, topic, args...)
+				go bus.doPublishAsync(handler, e)
+			} else if err := bus.doPublish(handler, e); err != nil {
+				return err
 			}
 		}
 	}
+	return nil
 }
 
-func (bus *EventBus) doPublish(handler *eventHandler, topic string, args ...interface{}) {
-	passedArguments := bus.setUpPublish(handler, args...)
-	handler.callBack.Call(passedArguments)
+func (bus *EventBus) doPublish(handler *eventHandler, e Event) error {
+	// passedArguments := bus.setUpPublish(handler, topic, e)
+	resultValues := handler.callBack.Call([]reflect.Value{reflect.ValueOf(e)})
+	if len(resultValues) > 0 && !resultValues[0].IsNil() {
+		return resultValues[0].Interface().(error)
+	}
+	return nil
 }
 
-func (bus *EventBus) doPublishAsync(handler *eventHandler, topic string, args ...interface{}) {
+func (bus *EventBus) doPublishAsync(handler *eventHandler, e Event) error {
 	defer bus.wg.Done()
 	if handler.transactional {
 		defer handler.Unlock()
 	}
-	bus.doPublish(handler, topic, args...)
+	return bus.doPublish(handler, e)
 }
 
 func (bus *EventBus) removeHandler(topic string, idx int) {
@@ -195,18 +220,41 @@ func (bus *EventBus) findHandlerIdx(topic string, callback reflect.Value) int {
 	return -1
 }
 
-func (bus *EventBus) setUpPublish(callback *eventHandler, args ...interface{}) []reflect.Value {
-	funcType := callback.callBack.Type()
-	passedArguments := make([]reflect.Value, len(args))
-	for i, v := range args {
-		if v == nil {
-			passedArguments[i] = reflect.New(funcType.In(i)).Elem()
-		} else {
-			passedArguments[i] = reflect.ValueOf(v)
+func handlerTopic(fn interface{}) (topic string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("cannot handle event type: %v", r)
+		}
+	}()
+	t := reflect.TypeOf(fn)
+	if t.Kind() != reflect.Func {
+		return "", ErrInvalidHandler
+	}
+	if t.NumIn() != 1 {
+		return "", ErrInvalidHandler
+	}
+	if t.NumOut() != 1 {
+		return "", ErrInvalidHandler
+	}
+	if t.Out(0).Name() != "error" {
+		return "", ErrInvalidHandler
+	}
+	in := t.In(0)
+	// Check if type implement Event as pointer receiver
+	if in.Kind() == reflect.Ptr {
+		_, ok := reflect.Zero(in.Elem()).Interface().(Event)
+		if ok {
+			in = in.Elem()
 		}
 	}
-
-	return passedArguments
+	e, ok := reflect.Zero(in).Interface().(Event)
+	if !ok {
+		return "", ErrInvalidHandler
+	}
+	if !reflect.ValueOf(e).IsValid() {
+		return "", fmt.Errorf("%v and T must be a pointer receiver", ErrInvalidHandler)
+	}
+	return e.Topic(), nil
 }
 
 // WaitAsync waits for all async callbacks to complete

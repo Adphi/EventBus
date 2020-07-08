@@ -3,186 +3,157 @@ package eventbus
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+type EventA struct{}
+
+func (*EventA) Topic() string {
+	return "event-A"
+}
+
+type EventB struct{}
+
+func (*EventB) Topic() string {
+	return "event-B"
+}
 
 func TestNew(t *testing.T) {
 	bus := New()
-	if bus == nil {
-		t.Log("New EventBus not created!")
-		t.Fail()
-	}
+	assert.NotNil(t, bus)
 }
 
 func TestHasCallback(t *testing.T) {
 	bus := New()
-	bus.Subscribe("topic", func() {})
-	if bus.HasCallback("topic_topic") {
-		t.Fail()
-	}
-	if !bus.HasCallback("topic") {
-		t.Fail()
-	}
+	err := bus.SubscribeSync(func(a *EventA) error { return nil })
+	require.NoError(t, err)
+	assert.False(t, bus.HasCallback(&EventB{}))
+	assert.True(t, bus.HasCallback(&EventA{}))
 }
 
 func TestSubscribe(t *testing.T) {
 	bus := New()
-	if bus.Subscribe("topic", func() {}) != nil {
-		t.Fail()
-	}
-	if bus.Subscribe("topic", "String") == nil {
-		t.Fail()
-	}
+	assert.NoError(t, bus.SubscribeSync(func(*EventB) error { return nil }))
+	assert.Error(t, bus.SubscribeSync("topic"))
 }
 
 func TestSubscribeOnce(t *testing.T) {
 	bus := New()
-	if bus.SubscribeOnce("topic", func() {}) != nil {
-		t.Fail()
-	}
-	if bus.SubscribeOnce("topic", "String") == nil {
-		t.Fail()
-	}
+	assert.NoError(t, bus.SubscribeOnce(func(a *EventA) error { return nil }))
+	assert.Error(t, bus.SubscribeOnce(func(a *EventA) {}))
 }
 
 func TestSubscribeOnceAndManySubscribe(t *testing.T) {
 	bus := New()
-	event := "topic"
 	flag := 0
-	fn := func() { flag += 1 }
-	bus.SubscribeOnce(event, fn)
-	bus.Subscribe(event, fn)
-	bus.Subscribe(event, fn)
-	bus.Publish(event)
-
-	if flag != 3 {
-		t.Fail()
-	}
+	fn := func(e *EventA) error { flag += 1; return nil }
+	assert.NoError(t, bus.SubscribeOnceSync(fn))
+	assert.NoError(t, bus.SubscribeSync(fn))
+	assert.NoError(t, bus.SubscribeSync(fn))
+	assert.NoError(t, bus.Publish(&EventA{}))
+	assert.Equal(t, 3, flag)
 }
 
 func TestUnsubscribe(t *testing.T) {
 	bus := New()
-	handler := func() {}
-	bus.Subscribe("topic", handler)
-	if bus.Unsubscribe("topic", handler) != nil {
-		t.Fail()
-	}
-	if bus.Unsubscribe("topic", handler) == nil {
-		t.Fail()
-	}
-}
-
-type handler struct {
-	val int
-}
-
-func (h *handler) Handle() {
-	h.val++
+	handler := func(a Event1) error { return nil }
+	assert.NoError(t, bus.SubscribeSync(handler))
+	assert.NoError(t, bus.Unsubscribe(handler))
+	assert.Error(t, bus.Unsubscribe(handler))
 }
 
 func TestUnsubscribeMethod(t *testing.T) {
 	bus := New()
-	h := &handler{val: 0}
-
-	bus.Subscribe("topic", h.Handle)
-	bus.Publish("topic")
-	if bus.Unsubscribe("topic", h.Handle) != nil {
-		t.Fail()
+	val := 0
+	h := func(a *EventA) error {
+		val++
+		return nil
 	}
-	if bus.Unsubscribe("topic", h.Handle) == nil {
-		t.Fail()
-	}
-	bus.Publish("topic")
+	assert.NoError(t, bus.SubscribeSync(h))
+	assert.NoError(t, bus.Publish(&EventA{}))
+	assert.NoError(t, bus.Unsubscribe(h))
+	assert.Error(t, bus.Unsubscribe(h))
+	assert.NoError(t, bus.Publish(&EventA{}))
 	bus.WaitAsync()
+	assert.Equal(t, 1, val)
+}
 
-	if h.val != 1 {
-		t.Fail()
-	}
+type A struct {
+	val int
+	obj interface{}
+}
+
+func (a *A) Topic() string {
+	return "a"
 }
 
 func TestPublish(t *testing.T) {
 	bus := New()
-	bus.Subscribe("topic", func(a int, err error) {
-		if a != 10 {
-			t.Fail()
-		}
 
-		if err != nil {
+	err := bus.SubscribeSync(func(a *A) error {
+		if a == nil {
+			t.FailNow()
+		}
+		if a.val != 10 {
 			t.Fail()
 		}
+		if a.obj != nil {
+			t.Fail()
+		}
+		return nil
 	})
-	bus.Publish("topic", 10, nil)
+	assert.NoError(t, err)
+	assert.NoError(t, bus.Publish(&A{val: 10}))
+	assert.Error(t, bus.Publish(nil))
+}
+
+type Event1 struct {
+	a int
+	out *[]int
+	dur string
+}
+func (Event1) Topic() string {
+	return "event1"
 }
 
 func TestSubcribeOnceAsync(t *testing.T) {
 	results := make([]int, 0)
-
 	bus := New()
-	bus.SubscribeOnceAsync("topic", func(a int, out *[]int) {
-		*out = append(*out, a)
-	})
+	assert.NoError(t, bus.SubscribeOnce(func(e *Event1) error {
+		results = append(results, e.a)
+		return nil
+	}))
 
-	bus.Publish("topic", 10, &results)
-	bus.Publish("topic", 10, &results)
+	assert.NoError(t, bus.Publish(&Event1{a: 10}))
+	assert.NoError(t, bus.Publish(&Event1{a: 10}))
 
 	bus.WaitAsync()
 
-	if len(results) != 1 {
-		t.Fail()
-	}
+	assert.Len(t, results, 1)
 
-	if bus.HasCallback("topic") {
-		t.Fail()
-	}
+	assert.False(t, bus.HasCallback(&Event1{}))
 }
 
 func TestSubscribeAsyncTransactional(t *testing.T) {
 	results := make([]int, 0)
 
 	bus := New()
-	bus.SubscribeAsync("topic", func(a int, out *[]int, dur string) {
-		sleep, _ := time.ParseDuration(dur)
+	assert.NoError(t, bus.Subscribe(func(e Event1) error {
+		sleep, _ := time.ParseDuration(e.dur)
 		time.Sleep(sleep)
-		*out = append(*out, a)
-	}, true)
+		*e.out = append(*e.out, e.a)
+		return nil
+	}, true))
 
-	bus.Publish("topic", 1, &results, "1s")
-	bus.Publish("topic", 2, &results, "0s")
-
-	bus.WaitAsync()
-
-	if len(results) != 2 {
-		t.Fail()
-	}
-
-	if results[0] != 1 || results[1] != 2 {
-		t.Fail()
-	}
-}
-
-func TestSubscribeAsync(t *testing.T) {
-	results := make(chan int)
-
-	bus := New()
-	bus.SubscribeAsync("topic", func(a int, out chan<- int) {
-		out <- a
-	}, false)
-
-	bus.Publish("topic", 1, results)
-	bus.Publish("topic", 2, results)
-
-	numResults := 0
-
-	go func() {
-		for _ = range results {
-			numResults++
-		}
-	}()
+	assert.NoError(t, bus.Publish(Event1{1, &results, "1s"}))
+	assert.NoError(t, bus.Publish(Event1{2, &results, "0s"}))
 
 	bus.WaitAsync()
 
-	time.Sleep(10 * time.Millisecond)
-
-	if numResults != 2 {
-		t.Fail()
-	}
+	require.Len(t, results, 2)
+	assert.Equal(t, 1, results[0])
+	assert.Equal(t, 2, results[1])
 }
+
